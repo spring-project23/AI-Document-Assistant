@@ -14,7 +14,10 @@ import tempfile
 load_dotenv()
 
 # Groq Configuration
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = (
+    st.secrets.get("GROQ_API_KEY")
+    or os.getenv("GROQ_API_KEY")
+)
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY not found in environment variables. Please set it in your .env file.")
     st.stop()
