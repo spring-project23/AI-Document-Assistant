@@ -1,0 +1,9 @@
+streamlit
+pandas
+PyPDF2
+deep_translator
+gtts
+python-dotenv
+groq
+openpyxl  # For Excel reading support in pandas
+requests  # Already included, but explicit for completeness
