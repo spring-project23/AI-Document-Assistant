@@ -1,9 +1,9 @@
 streamlit
 pandas
-langsmith
 PyPDF2
 deep_translator
 gtts
+langsmith
 python-dotenv
 groq
 openpyxl  # For Excel reading support in pandas
