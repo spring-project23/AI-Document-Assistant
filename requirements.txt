@@ -1,5 +1,6 @@
 streamlit
 pandas
+langsmith
 PyPDF2
 deep_translator
 gtts
