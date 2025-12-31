@@ -3,6 +3,9 @@ pandas
 PyPDF2
 deep_translator
 gtts
+langchain
+langchain-groq
+langchain-community
 langsmith
 python-dotenv
 groq
