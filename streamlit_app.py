@@ -175,7 +175,7 @@ Context: {context}
 
 Question: {question}
 
-Answer concisely in English. If you cannot answer from the context, say "I cannot determine this from the provided information."""",
+Answer concisely in English. If you cannot answer from the context, say "I cannot determine this from the provided information.""",
             input_variables=["context", "question"],
         )
         qa_chain = RetrievalQA.from_chain_type(
