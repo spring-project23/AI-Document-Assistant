@@ -9,3 +9,4 @@ langchain-groq>=0.1.0
 langchain-community>=0.2.16
 langsmith>=0.1.0
 openpyxl>=3.1.0  # For Excel reading with pandas
+duckduckgo-search>=6.2.10
