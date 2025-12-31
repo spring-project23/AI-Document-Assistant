@@ -7,12 +7,13 @@ from gtts import gTTS
 from groq import Groq
 import tempfile
 import streamlit as st
+from functools import partial  # Not needed if using .bind()
 
-# Enhanced LangChain integration for agentic AI (Updated for LangChain 0.3+ / 1.0+)
+# Enhanced LangChain integration for agentic AI
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
-from langchain.agents import create_agent, AgentExecutor  # Updated: Use create_agent for ReAct-style agents
+from langchain.agents import create_react_agent, AgentExecutor  # Corrected import for LangChain 0.2+
 from langchain import hub
 from langchain_community.tools import DuckDuckGoSearchRun  # Optional external tool
 from langsmith import traceable
@@ -164,11 +165,11 @@ def translate_text(text: str, target_lang: str) -> str:
 search_tool = DuckDuckGoSearchRun()
 
 # ================================
-# Agentic Q&A Pipeline with LangChain Agent (Updated for latest API)
+# Agentic Q&A Pipeline with LangChain ReAct Agent
 # ================================
 @traceable(name="Agentic Document Q&A Pipeline", run_type="chain")
 def ask_question(question: str, language: str, data: dict):
-    """Enhanced agentic function — uses modern LangChain agent with tools, fully traced by LangSmith."""
+    """Enhanced agentic function — uses ReAct agent with tools, fully traced by LangSmith."""
     # Initialize LLM via LangChain
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY,
@@ -176,23 +177,26 @@ def ask_question(question: str, language: str, data: dict):
         temperature=0.7
     )
     
-    # Define tools
-    tools = [summarize_data, calculate_stats, translate_text, search_tool]
+    # Define and bind tools with data and language
+    bound_summarize = summarize_data.bind(data=data)
+    bound_calculate = calculate_stats.bind(data=data)
+    bound_translate = translate_text.bind(target_lang=language)
+    tools = [bound_summarize, bound_calculate, bound_translate, search_tool]
     
-    # Pull ReAct prompt from LangChain Hub (for ReAct-style behavior)
+    # Pull ReAct prompt from LangChain Hub
     react_prompt = hub.pull("hwchase17/react")
-    # Customize the prompt for our use case
-    react_prompt.messages[0].prompt.template += """
-    You are an accurate AI assistant for document Q&A. Use only the provided tools and data to answer.
-    Data available via tools (pass data dict to summarize_data/calculate_stats). Question: {input}
-    Language preference: {language}
-    Always reason step-by-step, use tools when needed (e.g., summarize_data to get context first, calculate_stats for numbers).
+    # Customize the prompt (append to the user message template)
+    user_template = react_prompt.messages[0].prompt.template
+    react_prompt.messages[0].prompt.template = user_template + """
+    You are an accurate AI assistant for document Q&A. Use the bound tools to access data.
+    Question: {input}
+    Always reason step-by-step. Use summarize_data first for context if needed, calculate_stats for numbers, translate_text for language.
     If you cannot answer from data/tools, say "I cannot determine this from the provided information."
     Final answer should be concise in English.
     """
     
-    # Create ReAct-style agent using create_agent (latest API equivalent)
-    agent = create_agent(llm, tools, react_prompt)
+    # Create ReAct agent
+    agent = create_react_agent(llm, tools, react_prompt)
     agent_executor = AgentExecutor(
         agent=agent,
         tools=tools,
@@ -201,15 +205,11 @@ def ask_question(question: str, language: str, data: dict):
     )
     
     # Prepare input
-    agent_input = {
-        "input": question,
-        "data": data,  # Pass data for tools
-        "language": language
-    }
+    agent_input = {"input": question}
     
     try:
         # Agent execution — automatically traced
-        @traceable(run_type="agent", name="Agent Execution")
+        @traceable(run_type="agent", name="ReAct Agent Execution")
         def run_agent():
             return agent_executor.invoke(agent_input)
         
@@ -223,7 +223,7 @@ def ask_question(question: str, language: str, data: dict):
             "agent_steps": agent_output.get("intermediate_steps", [])  # For debugging
         }
         
-        # Translation to Arabic if needed (post-process, or let agent handle via tool)
+        # Translation to Arabic if needed (post-process as fallback)
         if language == "ar":
             try:
                 arabic_answer = GoogleTranslator(source='en', target='ar').translate(english_answer)
@@ -255,7 +255,7 @@ def ask_question(question: str, language: str, data: dict):
 # Streamlit UI
 # ================================
 st.title("AI Document Assistant (Agentic Edition)")
-st.caption("Upload an Excel or PDF and ask questions in English or Arabic. Powered by LangChain Agent for autonomous tool use!")
+st.caption("Upload an Excel or PDF and ask questions in English or Arabic. Powered by LangChain ReAct Agent for autonomous tool use!")
 
 uploaded_file = st.file_uploader(
     "Upload Excel (.xlsx, .xls) or PDF",
@@ -317,6 +317,6 @@ if os.getenv("LANGCHAIN_TRACING_V2") == "true":
     project_name = os.getenv("LANGCHAIN_PROJECT", "default")
     st.sidebar.caption(f"LangSmith tracing enabled → [View traces](https://smith.langchain.com/projects/p/{project_name})")
     st.sidebar.markdown("### Demo Notes")
-    st.sidebar.markdown("- **Agentic Features**: Modern LangChain agent (ReAct-style) decides tools dynamically.")
+    st.sidebar.markdown("- **Agentic Features**: ReAct agent decides tools (e.g., calculate_stats for sums). Tools bound with data.")
     st.sidebar.markdown("- **Tracing**: See full chain in LangSmith for debugging.")
-    st.sidebar.markdown("- **Requirements**: `pip install langchain>=0.3.0 langchain-groq langchain-community` (Updated for latest API)")
+    st.sidebar.markdown("- **Fix Note**: Ensure `pip install --upgrade langchain>=0.2.0 langchain-groq langchain-community` for imports.")
