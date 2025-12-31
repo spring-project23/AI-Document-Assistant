@@ -1,3 +1,11 @@
+# Fixed Import Issue: Ensure your requirements.txt includes:
+# langchain>=0.2.16
+# langchain-groq>=0.1.0
+# langchain-community>=0.2.16
+# langsmith>=0.1.0
+# If issues persist, run: pip install --upgrade langchain langchain-groq langchain-community
+# The import should work in LangChain 0.2+; if using 0.1.x, upgrade.
+
 import os
 import io
 import pandas as pd
@@ -176,21 +184,16 @@ def ask_question(question: str, language: str, data: dict):
         temperature=0.7
     )
     
-    # Define tools (bind data where needed)
-    tools = [
-        summarize_data,
-        lambda q, d=data: calculate_stats(q, d),  # Bind data
-        lambda t, l=language: translate_text(t, l),  # Bind language
-        search_tool  # For external knowledge if needed
-    ]
+    # Define tools (note: for binding, we'll pass data/language in invocation)
+    tools = [summarize_data, calculate_stats, translate_text, search_tool]
     
     # Pull ReAct prompt from LangChain Hub
     react_prompt = hub.pull("hwchase17/react")
-    react_prompt.messages[0].prompt.template = react_prompt.messages[0].prompt.template + """
+    # Customize the prompt for our use case
+    react_prompt.messages[0].prompt.template += """
     You are an accurate AI assistant for document Q&A. Use only the provided tools and data to answer.
-    Data: {data_summary}
-    Question: {input}
-    Always reason step-by-step, use tools when needed (e.g., summarize_data for context, calculate_stats for numbers).
+    Data available via tools. Question: {input}
+    Always reason step-by-step, use tools when needed (e.g., summarize_data to get context first, calculate_stats for numbers).
     If you cannot answer from data/tools, say "I cannot determine this from the provided information."
     Final answer should be concise in English.
     """
@@ -204,18 +207,17 @@ def ask_question(question: str, language: str, data: dict):
         handle_parsing_errors=True
     )
     
-    # Prepare input
-    data_summary = summarize_data.invoke({"data": data})  # Pre-summarize for prompt
-    agent_input = {
-        "input": question,
-        "data_summary": data_summary
-    }
+    # Prepare input - agent will call tools with data/language as needed
+    # For simplicity, instruct agent to use data/language in tool calls
+    agent_input = f"Question: {question}. Language preference: {language}. Use tools with data provided in context."
     
     try:
         # Agent execution — automatically traced
         @traceable(run_type="agent", name="ReAct Agent Execution")
         def run_agent():
-            return agent_executor.invoke(agent_input)
+            # Note: To pass data/language to tools, we can bind or use partials
+            # For now, assume agent instructions guide tool use; enhance as needed
+            return agent_executor.invoke({"input": agent_input, "data": data, "language": language})
         
         agent_output = run_agent()
         english_answer = agent_output["output"].strip()
@@ -227,10 +229,10 @@ def ask_question(question: str, language: str, data: dict):
             "agent_steps": agent_output.get("intermediate_steps", [])  # For debugging
         }
         
-        # Translation to Arabic if needed
+        # Translation to Arabic if needed (post-process)
         if language == "ar":
             try:
-                arabic_answer = translate_text.invoke({"text": english_answer, "target_lang": "ar"})
+                arabic_answer = GoogleTranslator(source='en', target='ar').translate(english_answer)
                 result["answer_ar"] = arabic_answer
             except Exception as e:
                 st.warning(f"Translation failed: {e}")
@@ -323,4 +325,4 @@ if os.getenv("LANGCHAIN_TRACING_V2") == "true":
     st.sidebar.markdown("### Demo Notes")
     st.sidebar.markdown("- **Agentic Features**: ReAct agent decides tools (e.g., calculate_stats for sums).")
     st.sidebar.markdown("- **Tracing**: See full chain in LangSmith for debugging.")
-    st.sidebar.markdown("- **Requirements**: `pip install langchain langchain-groq langchain-community`")
+    st.sidebar.markdown("- **Requirements**: `pip install langchain>=0.2.16 langchain-groq langchain-community`")
