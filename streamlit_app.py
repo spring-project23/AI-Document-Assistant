@@ -8,18 +8,23 @@ from groq import Groq
 import tempfile
 import streamlit as st
 
-# LangSmith integration
+# Enhanced LangChain integration for agentic AI
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
+from langchain_core.tools import tool
+from langchain_groq import ChatGroq
+from langchain.agents import create_react_agent, AgentExecutor
+from langchain import hub
+from langchain_community.tools import DuckDuckGoSearchRun  # Optional external tool
 from langsmith import traceable
 
 # ================================
 # ENVIRONMENT VARIABLES SETUP
 # ================================
-
 # For Streamlit Cloud deployment, add these to your secrets.toml file:
 # GROQ_API_KEY = "your_groq_key_here"
 # LANGCHAIN_TRACING_V2 = "true"
 # LANGCHAIN_API_KEY = "lsv2_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-# LANGCHAIN_PROJECT = "Document-Assistant"  # Optional: custom project name
+# LANGCHAIN_PROJECT = "Document-Assistant" # Optional: custom project name
 
 # Groq API Key
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
@@ -28,7 +33,6 @@ if not GROQ_API_KEY:
     st.stop()
 
 # LangSmith setup - Set environment variables from secrets for deployment
-# This ensures tracing works on Streamlit Cloud without relying on .env
 os.environ["LANGCHAIN_TRACING_V2"] = st.secrets.get("LANGCHAIN_TRACING_V2", "false")
 os.environ["LANGCHAIN_API_KEY"] = st.secrets.get("LANGCHAIN_API_KEY", "")
 os.environ["LANGCHAIN_PROJECT"] = st.secrets.get("LANGCHAIN_PROJECT", "Document-Assistant")
@@ -37,7 +41,7 @@ os.environ["LANGCHAIN_PROJECT"] = st.secrets.get("LANGCHAIN_PROJECT", "Document-
 if not os.environ["LANGCHAIN_API_KEY"]:
     st.warning("LANGCHAIN_API_KEY not found in secrets. LangSmith tracing will be disabled.")
 
-# Groq Client
+# Groq Client (for fallback, but we'll use LangChain's ChatGroq)
 LLAMA_MODEL_NAME = "llama-3.3-70b-versatile"
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -117,66 +121,121 @@ def process_pdf(file_content, filename):
         st.error(f"Error processing PDF: {str(e)}")
         return None
 
-@traceable(name="Document Q&A Pipeline", run_type="chain")
-def ask_question(question: str, language: str, data: dict):
-    """Main function — fully traced by LangSmith"""
-    data_type = data["type"]
-    # Build context
-    if data_type == "excel":
+# ================================
+# Agentic Tools for LangChain
+# ================================
+@tool
+def summarize_data(data: dict) -> str:
+    """Summarize Excel/PDF content for the agent."""
+    if data["type"] == "excel":
         df = data["content"]
-        data_summary = f"""
-Data Summary:
-- Rows: {df.shape[0]}
-- Columns: {df.shape[1]}
-- Column Names: {', '.join(df.columns.tolist())}
-Full Data:
-{df.to_string(index=False)}
-Numeric Summary:
-{df.describe().to_string() if not df.select_dtypes(include='number').empty else 'No numeric data'}
-"""
-    elif data_type == "pdf":
-        text = data["content"]
-        truncated = text[:8000] + ("..." if len(text) > 8000 else "")
-        data_summary = f"""
-Document: {data['filename']}
-Pages: {data['pages']}
-Text Length: {data['text_length']}
-Content Preview:
-{truncated}
-"""
+        return f"Data Summary: Rows: {df.shape[0]}, Columns: {list(df.columns)}, Preview: {df.head(3).to_string()}"
     else:
-        st.error("Unknown data type")
-        return None
-    prompt = f"""You are an accurate AI assistant. Use only the provided document/data to answer.
-{data_summary}
-Question: {question}
-Answer concisely in English. If you cannot answer from the data, say "I cannot determine this from the provided information."
-"""
+        text = data["content"]
+        truncated = text[:500] + ("..." if len(text) > 500 else "")
+        return f"Document: {data['filename']}, Pages: {data['pages']}, Preview: {truncated}"
+
+@tool
+def calculate_stats(question: str, data: dict) -> str:
+    """Run pandas stats if question involves calculations (e.g., 'total sales'). Only for Excel data."""
+    if data["type"] != "excel":
+        return "Stats only available for Excel data."
+    df = data["content"]
+    if "total" in question.lower() or "sum" in question.lower():
+        numeric_cols = df.select_dtypes(include='number').columns
+        if len(numeric_cols) > 0:
+            return f"Numeric Summary: {df[numeric_cols].sum().to_dict()}"
+    elif "average" in question.lower() or "mean" in question.lower():
+        numeric_cols = df.select_dtypes(include='number').columns
+        if len(numeric_cols) > 0:
+            return f"Average: {df[numeric_cols].mean().to_dict()}"
+    return "No relevant stats computable from the question."
+
+@tool
+def translate_text(text: str, target_lang: str) -> str:
+    """Translate text to the target language."""
     try:
-        # This LLM call is automatically traced by LangSmith
-        @traceable(run_type="llm", name=f"Groq - {LLAMA_MODEL_NAME}")
-        def call_llm():
-            return client.chat.completions.create(
-                model=LLAMA_MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=1024,
-            )
-        response = call_llm()
-        english_answer = response.choices[0].message.content.strip()
+        translator = GoogleTranslator(source='en', target=target_lang)
+        return translator.translate(text)
+    except Exception as e:
+        return f"Translation failed: {e}. Original: {text}"
+
+# Optional: External search tool for grounding answers
+search_tool = DuckDuckGoSearchRun()
+
+# ================================
+# Agentic Q&A Pipeline with LangChain ReAct Agent
+# ================================
+@traceable(name="Agentic Document Q&A Pipeline", run_type="chain")
+def ask_question(question: str, language: str, data: dict):
+    """Enhanced agentic function — uses ReAct agent with tools, fully traced by LangSmith."""
+    # Initialize LLM via LangChain
+    llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name=LLAMA_MODEL_NAME,
+        temperature=0.7
+    )
+    
+    # Define tools (bind data where needed)
+    tools = [
+        summarize_data,
+        lambda q, d=data: calculate_stats(q, d),  # Bind data
+        lambda t, l=language: translate_text(t, l),  # Bind language
+        search_tool  # For external knowledge if needed
+    ]
+    
+    # Pull ReAct prompt from LangChain Hub
+    react_prompt = hub.pull("hwchase17/react")
+    react_prompt.messages[0].prompt.template = react_prompt.messages[0].prompt.template + """
+    You are an accurate AI assistant for document Q&A. Use only the provided tools and data to answer.
+    Data: {data_summary}
+    Question: {input}
+    Always reason step-by-step, use tools when needed (e.g., summarize_data for context, calculate_stats for numbers).
+    If you cannot answer from data/tools, say "I cannot determine this from the provided information."
+    Final answer should be concise in English.
+    """
+    
+    # Create ReAct agent
+    agent = create_react_agent(llm, tools, react_prompt)
+    agent_executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,  # Logs agent thoughts/actions for debugging (visible in traces)
+        handle_parsing_errors=True
+    )
+    
+    # Prepare input
+    data_summary = summarize_data.invoke({"data": data})  # Pre-summarize for prompt
+    agent_input = {
+        "input": question,
+        "data_summary": data_summary
+    }
+    
+    try:
+        # Agent execution — automatically traced
+        @traceable(run_type="agent", name="ReAct Agent Execution")
+        def run_agent():
+            return agent_executor.invoke(agent_input)
+        
+        agent_output = run_agent()
+        english_answer = agent_output["output"].strip()
+        
         result = {
             "question": question,
             "answer_en": english_answer,
-            "data_type": data_type
+            "data_type": data["type"],
+            "agent_steps": agent_output.get("intermediate_steps", [])  # For debugging
         }
-        # Translation to Arabic
+        
+        # Translation to Arabic if needed
         if language == "ar":
             try:
-                arabic_answer = GoogleTranslator(source='en', target='ar').translate(english_answer)
+                arabic_answer = translate_text.invoke({"text": english_answer, "target_lang": "ar"})
                 result["answer_ar"] = arabic_answer
             except Exception as e:
                 st.warning(f"Translation failed: {e}")
                 result["answer_ar"] = english_answer  # fallback
+        
         # Text-to-Speech
         text_to_speak = result.get("answer_ar") if language == "ar" else english_answer
         tts_lang = "ar" if language == "ar" else "en"
@@ -190,6 +249,7 @@ Answer concisely in English. If you cannot answer from the data, say "I cannot d
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+        
         return result
     except Exception as e:
         st.error(f"Failed to generate answer: {str(e)}")
@@ -198,8 +258,8 @@ Answer concisely in English. If you cannot answer from the data, say "I cannot d
 # ================================
 # Streamlit UI
 # ================================
-st.title("AI Document Assistant")
-st.caption("Upload an Excel or PDF and ask questions in English or Arabic")
+st.title("AI Document Assistant (Agentic Edition)")
+st.caption("Upload an Excel or PDF and ask questions in English or Arabic. Powered by LangChain ReAct Agent for autonomous tool use!")
 
 uploaded_file = st.file_uploader(
     "Upload Excel (.xlsx, .xls) or PDF",
@@ -228,19 +288,31 @@ if uploaded_file is not None:
 # Question interface
 if st.session_state.current_data:
     st.header("Ask a Question")
-    question = st.text_area("Your question:", height=120, placeholder="e.g., What is the total revenue in 2024?")
+    question = st.text_area("Your question:", height=120, placeholder="e.g., What is the total revenue in 2024? Or average salary?")
     language = st.selectbox("Answer Language", ["en", "ar"], format_func=lambda x: "English" if x == "en" else "Arabic")
-    if st.button("Get Answer", type="primary"):
-        if not question.strip():
-            st.warning("Please enter a question.")
-        else:
-            with st.spinner("Thinking..."):
-                result = ask_question(question.strip(), language, st.session_state.current_data)
-                if result:
-                    answer = result.get("answer_ar") if language == "ar" else result["answer_en"]
-                    st.markdown(f"**Answer ({'Arabic' if language == 'ar' else 'English'}):**")
-                    st.markdown(answer)
-                    st.audio(result["audio_bytes"], format="audio/mp3")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if st.button("Get Agentic Answer", type="primary"):
+            if not question.strip():
+                st.warning("Please enter a question.")
+            else:
+                with st.spinner("Agent thinking and acting..."):
+                    result = ask_question(question.strip(), language, st.session_state.current_data)
+                    if result:
+                        answer = result.get("answer_ar") if language == "ar" else result["answer_en"]
+                        st.markdown(f"**Answer ({'Arabic' if language == 'ar' else 'English'}):**")
+                        st.markdown(answer)
+                        st.audio(result["audio_bytes"], format="audio/mp3")
+                        
+                        # Show agent steps if verbose (for demo)
+                        if result.get("agent_steps"):
+                            with st.expander("Agent Reasoning Steps (from LangSmith Trace)"):
+                                for step in result["agent_steps"]:
+                                    st.write(step)
+    
+    with col2:
+        st.info("💡 Agent uses tools like pandas stats, translation, and search autonomously.")
 else:
     st.info("Upload and process a file to begin asking questions.")
 
@@ -248,3 +320,7 @@ else:
 if os.getenv("LANGCHAIN_TRACING_V2") == "true":
     project_name = os.getenv("LANGCHAIN_PROJECT", "default")
     st.sidebar.caption(f"LangSmith tracing enabled → [View traces](https://smith.langchain.com/projects/p/{project_name})")
+    st.sidebar.markdown("### Demo Notes")
+    st.sidebar.markdown("- **Agentic Features**: ReAct agent decides tools (e.g., calculate_stats for sums).")
+    st.sidebar.markdown("- **Tracing**: See full chain in LangSmith for debugging.")
+    st.sidebar.markdown("- **Requirements**: `pip install langchain langchain-groq langchain-community`")
